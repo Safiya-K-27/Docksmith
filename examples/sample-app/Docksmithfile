@@ -1,0 +1,7 @@
+FROM mini:latest
+WORKDIR /app
+ENV MESSAGE=Hello-from-Docksmith
+COPY app.sh /app/app.sh
+COPY assets/** /app/assets/
+RUN chmod +x /app/app.sh && echo built-by-run > /app/built.txt
+CMD ["/bin/sh","/app/app.sh"]
