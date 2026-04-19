@@ -31,6 +31,7 @@ func usage() {
 	fmt.Println("  rmi <name:tag>")
 	fmt.Println("  run [-e KEY=VALUE ...] <name:tag> [cmd arg ...]")
 	fmt.Println("  import-rootfs -t <name:tag> <rootfsDir>")
+	fmt.Println("  diff <name:tag> <name:tag>")
 }
 
 func main() {
@@ -120,6 +121,20 @@ func realMain() error {
 			return err
 		}
 		return cmdImportRootfs(root, ref, fs.Arg(0))
+
+	case "diff":
+		if len(os.Args) != 4 {
+			return errors.New("diff requires two image references name:tag")
+		}
+		ref1, err := parseImageRef(os.Args[2])
+		if err != nil {
+			return err
+		}
+		ref2, err := parseImageRef(os.Args[3])
+		if err != nil {
+			return err
+		}
+		return cmdDiff(root, ref1, ref2)
 
 	default:
 		usage()

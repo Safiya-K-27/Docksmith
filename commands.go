@@ -1,11 +1,136 @@
 package main
 
 import (
+	"archive/tar"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
+	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 )
+
+type fileInfo struct {
+	digest string
+}
+
+func tarSnapshot(storeRoot string, layers []LayerDescriptor) (map[string]fileInfo, error) {
+	snap := map[string]fileInfo{}
+
+	for _, layer := range layers {
+		tarPath := digestFilePath(storeRoot, layer.Digest)
+		f, err := os.Open(tarPath)
+		if err != nil {
+			return nil, fmt.Errorf("open layer %s: %w", layer.Digest, err)
+		}
+
+		tr := tar.NewReader(f)
+		for {
+			hdr, err := tr.Next()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				f.Close()
+				return nil, fmt.Errorf("read layer %s: %w", layer.Digest, err)
+			}
+
+			// Normalize to /path/to/file
+			name := strings.TrimSuffix(hdr.Name, "/")
+			name = strings.TrimPrefix(name, "./")
+			if !strings.HasPrefix(name, "/") {
+				name = "/" + name
+			}
+
+			dir := path.Dir(name)
+			base := path.Base(name)
+
+			// Opaque whiteout: remove all existing entries in this directory
+			if base == ".wh..wh..opq" {
+				for p := range snap {
+					if path.Dir(p) == dir {
+						delete(snap, p)
+					}
+				}
+				continue
+			}
+
+			// Whiteout: remove specific file
+			if strings.HasPrefix(base, ".wh.") {
+				actual := path.Join(dir, strings.TrimPrefix(base, ".wh."))
+				delete(snap, actual)
+				continue
+			}
+
+			switch hdr.Typeflag {
+			case tar.TypeReg, tar.TypeRegA:
+				h := sha256.New()
+				if _, err := io.Copy(h, tr); err != nil {
+					f.Close()
+					return nil, fmt.Errorf("hash %s in layer %s: %w", hdr.Name, layer.Digest, err)
+				}
+				snap[name] = fileInfo{digest: hex.EncodeToString(h.Sum(nil))}
+			case tar.TypeSymlink:
+				snap[name] = fileInfo{digest: "symlink:" + hdr.Linkname}
+			}
+		}
+		f.Close()
+	}
+
+	return snap, nil
+}
+
+func cmdDiff(storeRoot string, ref1, ref2 ImageRef) error {
+	m1, err := loadManifest(storeRoot, ref1)
+	if err != nil {
+		return err
+	}
+	m2, err := loadManifest(storeRoot, ref2)
+	if err != nil {
+		return err
+	}
+
+	snap1, err := tarSnapshot(storeRoot, m1.Layers)
+	if err != nil {
+		return fmt.Errorf("snapshot %s:%s: %w", ref1.Name, ref1.Tag, err)
+	}
+	snap2, err := tarSnapshot(storeRoot, m2.Layers)
+	if err != nil {
+		return fmt.Errorf("snapshot %s:%s: %w", ref2.Name, ref2.Tag, err)
+	}
+
+	type diffEntry struct {
+		filePath string
+		status   string
+	}
+	var results []diffEntry
+
+	for p, fi2 := range snap2 {
+		if fi1, ok := snap1[p]; !ok {
+			results = append(results, diffEntry{p, "added"})
+		} else if fi1.digest != fi2.digest {
+			results = append(results, diffEntry{p, "modified"})
+		}
+	}
+	for p := range snap1 {
+		if _, ok := snap2[p]; !ok {
+			results = append(results, diffEntry{p, "removed"})
+		}
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].filePath < results[j].filePath
+	})
+
+	prefix := map[string]string{"added": "+", "modified": "~", "removed": "-"}
+	for _, r := range results {
+		fmt.Printf("%s %s (%s)\n", prefix[r.status], r.filePath, r.status)
+	}
+	return nil
+}
 
 func cmdImages(storeRoot string) error {
 	imgs, err := listManifests(storeRoot)
